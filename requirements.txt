@@ -1,0 +1,3 @@
+PyPDF2
+langchain_huggingface
+langchain_community
