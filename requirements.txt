@@ -1,4 +1,6 @@
 PyPDF2
+pdf2image
+pytesseract
 langchain_huggingface
 langchain_community
 faiss-cpu
