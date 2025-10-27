@@ -7,7 +7,6 @@ from langchain_text_splitters import CharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
-from langchain_classic.chains import ConversationalRetrievalChain
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
@@ -196,18 +195,26 @@ def run_conversational_agent(pdf_files):
         text_chunks = []
 
     vectorstore = get_or_load_vectorstore(text_chunks, path=index_path)
-    conversation_chain = create_conversation_chain(vectorstore)
+    # conversation_chain = create_conversation_chain(vectorstore)  # no longer used in local run
 
     print("\n[READY] Ask questions about the document. Type 'exit' to quit.\n")
+
+    # Maintain chat history as LangChain messages for follow-ups
+    history_msgs = []
 
     while True:
         query = input("You: ").strip()
         if query.lower() == "exit":
             print("[INFO] Exiting conversation.")
             break
-        
-        response = conversation_chain.invoke({"question": query})
-        print("Bot:", response["answer"])
+
+        # RAG response using the latest pipeline
+        answer = generate_rag_response(vectorstore, query, history_messages=history_msgs, k=5)
+        print("Bot:", answer)
+
+        # Update history for follow-up questions
+        history_msgs.append(HumanMessage(content=query))
+        history_msgs.append(AIMessage(content=answer))
 
 
 if __name__ == "__main__":
