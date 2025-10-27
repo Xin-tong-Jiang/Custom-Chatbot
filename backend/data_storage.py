@@ -13,16 +13,23 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 load_dotenv()
 index_path = os.path.join(os.path.dirname(__file__), "faiss_index")
 
+PDF_DIR = "pdfs/"
+
 def get_pdf_text(pdf_docs):
     text = ""
     for pdf_path in pdf_docs:
-        if not os.path.exists(pdf_path):
-            print("[WARN] File not found:", pdf_path)
+        full_path = pdf_path
+        if not os.path.isabs(full_path) and not os.path.exists(full_path):
+            full_path = os.path.join(PDF_DIR, pdf_path) # For local run
+
+        if not os.path.exists(full_path):
+            print("[WARN] File not found:", full_path)
             continue
-        print("[INFO] Reading:", pdf_path)
+
+        print("[INFO] Reading:", full_path)
         extracted_text = ""
         try:
-            pdf_reader = PdfReader(pdf_path)
+            pdf_reader = PdfReader(full_path)
             for i, page in enumerate(pdf_reader.pages):
                 try:
                     page_text = page.extract_text()
@@ -33,11 +40,11 @@ def get_pdf_text(pdf_docs):
                     extracted_text += page_text + "\n"
                 else:
                     print(f"[INFO] Using OCR for page {i+1}...")
-                    extracted_text += extract_text_ocr(pdf_path, i)
+                    extracted_text += extract_text_ocr(full_path, i)
         except Exception as e:
-            print(f"[WARN] PyPDF2 failed for '{pdf_path}': {e}")
+            print(f"[WARN] PyPDF2 failed for '{full_path}': {e}")
             print("[INFO] Running full OCR for file...")
-            extracted_text = extract_text_ocr(pdf_path)
+            extracted_text = extract_text_ocr(full_path)
         text += extracted_text + "\n"
     return text.strip()
 
@@ -99,24 +106,7 @@ def get_or_load_vectorstore(text_chunks, path="faiss_index", model_name="sentenc
     print(f"[INFO] Vectorstore saved to '{path}'")
     return vectorstore
 
-
-def create_conversation_chain(vectorstore):
-    llm = ChatOpenAI(
-        model_name="gpt-4.1-mini",
-        temperature=0
-    )
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-    chain = ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        retriever=retriever,
-        verbose=False,
-        return_source_documents=False
-    )
-    print("[INFO] Created conversation chain with RAG")
-    return chain
-
 # RAG helper functions
-
 def format_history_from_db(chat_messages_db):
     """Convert DB rows to LangChain messages, skipping blanks."""
     msgs = []
@@ -181,6 +171,7 @@ def generate_rag_response(vectorstore, question, history_messages, k=5):
     return answer
 
 
+# Local test run function
 def run_conversational_agent(pdf_files):
     print("[INFO] Checking for existing FAISS vectorstore...")
     if not os.path.exists(index_path):
@@ -195,7 +186,6 @@ def run_conversational_agent(pdf_files):
         text_chunks = []
 
     vectorstore = get_or_load_vectorstore(text_chunks, path=index_path)
-    # conversation_chain = create_conversation_chain(vectorstore)  # no longer used in local run
 
     print("\n[READY] Ask questions about the document. Type 'exit' to quit.\n")
 
@@ -218,5 +208,5 @@ def run_conversational_agent(pdf_files):
 
 
 if __name__ == "__main__":
-    pdf_files = ["pdfs/Ads cookbook.pdf"]
+    pdf_files = ["Ads cookbook.pdf", "CALuxuryGuide_FY24_25.pdf", "Easy_recipes.pdf"]
     run_conversational_agent(pdf_files)
