@@ -1,9 +1,10 @@
 import os
 import re
 import pytesseract
+import hashlib
 from PyPDF2 import PdfReader
 from pdf2image import convert_from_path
-from langchain_text_splitters import CharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
@@ -64,23 +65,25 @@ def extract_text_ocr(pdf_path, page_index=None):
 
 def clean_text(text):
     """
-    Preserve paragraph breaks: collapse 2+ newlines to a marker, remove single newlines,
-    collapse spaces, then restore double newlines.
+    Normalize newlines while preserving both single and double line breaks.
+    - Convert CRLF to LF.
+    - Collapse 3+ newlines to exactly two.
+    - Trim trailing spaces and collapse multiple spaces.
     """
     text = text.replace("\r\n", "\n")
-    text = re.sub(r"\n{2,}", "<<PARA>>", text)
-    text = re.sub(r"\n", " ", text)
+    # Preserve single newlines; only collapse excessive blank lines
+    text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"<<PARA>>", "\n\n", text)
     return text.strip()
 
 
-def get_text_chunks(text, chunk_size=1000, chunk_overlap=200):
-    splitter = CharacterTextSplitter(
-        separator="\n\n",  # Split on paragraphs for better context
+def get_text_chunks(text, chunk_size=1000, chunk_overlap=300):
+    # Use recursive splitter with multiple fallback separators to avoid giant chunks
+    splitter = RecursiveCharacterTextSplitter(
+        separators=["\n\n", "\n", ". ", " ", ""],
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        length_function=len
+        length_function=len,
     )
     chunks = splitter.split_text(text)
     print(f"[INFO] Created {len(chunks)} text chunks")
@@ -136,24 +139,41 @@ def generate_general_response(question, history_messages):
         answer = (getattr(resp, "content", "") or "").strip()
     return answer
 
-def generate_rag_response(vectorstore, question, history_messages, k=5):
-    """Retrieve -> prompt with context -> LLM, with safe fallback to non-RAG."""
-    llm = ChatOpenAI(model_name="gpt-4.1-mini", temperature=0)
-    try:
-        # Use MMR for diverse coverage (selects chunks that are relevant to the query but dissimilar to each other)
-        docs = vectorstore.max_marginal_relevance_search(
-            question, k=k, fetch_k=max(20, k * 5), lambda_mult=0.5
-        )
-        print(f"[INFO] Retrieved {len(docs)} documents for RAG (MMR)")
-    except Exception as e:
-        print(f"[WARN] MMR search failed ({e}); falling back to similarity_search")
-        docs = vectorstore.similarity_search(question, k=k)
+def _dedup_docs(docs):
+    seen, out = set(), []
+    for d in docs:
+        content = (getattr(d, "page_content", "") or "")
+        digest = hashlib.md5(content.encode("utf-8")).hexdigest()
+        if digest in seen:
+            continue
+        seen.add(digest)
+        out.append(d)
+    return out
 
-    # Do not truncate context — we already cap k and chunk size
-    context_text = "\n\n---\n\n".join(getattr(d, "page_content", "") for d in docs)
+def generate_rag_response(vectorstore, question, history_messages, k=8):
+    """Retrieve -> prompt with context -> LLM, with safe fallback."""
+    llm = ChatOpenAI(model_name="gpt-4.1-mini", temperature=0)
+
+    # Prefer high-recall similarity first; fetch more, then keep top-k after dedup
+    try:
+        fetch_k = max(15, k * 3)
+        sim_docs = vectorstore.similarity_search(question, k=fetch_k)
+    except Exception as e:
+        print(f"[WARN] similarity_search failed: {e}")
+        sim_docs = []
+
+    merged = _dedup_docs(sim_docs)[:k]
+    print(f"[INFO] Retrieved {len(sim_docs)} sim, merged {len(merged)}")
+
+    if not merged:
+        print("[INFO] No docs retrieved; falling back to general response.")
+        return generate_general_response(question, history_messages)
+
+    context_text = "\n\n---\n\n".join(getattr(d, "page_content", "") for d in merged)
     system_prompt = (
-        "You are a helpful assistant. Use the provided context to answer the user's question in a concise manner.\n\n"
-        f"Context:\n{context_text if context_text else '[No relevant context found]'}"
+        "You are a helpful assistant. Use the provided context to answer the user's question. "
+        "If the context is insufficient, say you don't know. Be concise.\n\n"
+        f"Context:\n{context_text}"
     )
     messages = [
         SystemMessage(content=system_prompt),
